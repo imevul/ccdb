@@ -1,0 +1,95 @@
+plugins {
+	id 'java-library'
+	id 'net.neoforged.moddev' version '2.0.144'
+}
+
+version = mod_version
+group = mod_group_id
+
+base {
+	archivesName = "${mod_id}-${minecraft_version}"
+}
+
+java.toolchain.languageVersion = JavaLanguageVersion.of(21)
+
+repositories {
+	maven {
+		name = 'CC Tweaked'
+		url = 'https://maven.squiddev.cc'
+		content {
+			includeGroup 'cc.tweaked'
+		}
+	}
+}
+
+neoForge {
+	version = project.neo_version
+
+	parchment {
+		mappingsVersion = project.parchment_mappings_version
+		minecraftVersion = project.parchment_minecraft_version
+	}
+
+	runs {
+		server {
+			server()
+			programArgument '--nogui'
+		}
+
+		configureEach {
+			systemProperty 'forge.logging.markers', 'REGISTRIES'
+			logLevel = org.slf4j.event.Level.INFO
+		}
+	}
+
+	mods {
+		"${mod_id}" {
+			sourceSet sourceSets.main
+		}
+	}
+}
+
+dependencies {
+	compileOnly "cc.tweaked:cc-tweaked-${minecraft_version}-core-api:${cct_version}"
+	compileOnly "cc.tweaked:cc-tweaked-${minecraft_version}-forge-api:${cct_version}"
+
+	jarJar(implementation("org.xerial:sqlite-jdbc")) {
+		version {
+			strictly '[3.45,4.0)'
+			prefer sqlite_jdbc_version
+		}
+	}
+	additionalRuntimeClasspath "org.xerial:sqlite-jdbc:${sqlite_jdbc_version}"
+
+	testImplementation "org.junit.jupiter:junit-jupiter:5.11.4"
+	testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+var generateModMetadata = tasks.register('generateModMetadata', ProcessResources) {
+	var replaceProperties = [
+		minecraft_version      : minecraft_version,
+		minecraft_version_range: minecraft_version_range,
+		neo_version            : neo_version,
+		loader_version_range   : loader_version_range,
+		cct_version_range      : cct_version_range,
+		mod_id                 : mod_id,
+		mod_name               : mod_name,
+		mod_license            : mod_license,
+		mod_version            : mod_version,
+	]
+	inputs.properties replaceProperties
+	expand replaceProperties
+	from 'src/main/templates'
+	into 'build/generated/sources/modMetadata'
+}
+
+sourceSets.main.resources.srcDir generateModMetadata
+neoForge.ideSyncTask generateModMetadata
+
+tasks.withType(JavaCompile).configureEach {
+	options.encoding = 'UTF-8'
+}
+
+tasks.named('test', Test).configure {
+	useJUnitPlatform()
+}

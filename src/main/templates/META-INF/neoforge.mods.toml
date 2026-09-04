@@ -1,0 +1,35 @@
+modLoader = "javafml"
+loaderVersion = "${loader_version_range}"
+license = "${mod_license}"
+
+[[mods]]
+modId = "${mod_id}"
+version = "${mod_version}"
+displayName = "${mod_name}"
+# Server-only: clients without this jar must still be able to join.
+displayTest = "IGNORE_SERVER_VERSION"
+authors = "imevul"
+description = '''
+Shared SQLite Lua API for ComputerCraft. Dedicated-server jar; clients do not install it.
+'''
+
+[[dependencies.${mod_id}]]
+modId = "neoforge"
+type = "required"
+versionRange = "[${neo_version},)"
+ordering = "NONE"
+side = "SERVER"
+
+[[dependencies.${mod_id}]]
+modId = "minecraft"
+type = "required"
+versionRange = "${minecraft_version_range}"
+ordering = "NONE"
+side = "SERVER"
+
+[[dependencies.${mod_id}]]
+modId = "computercraft"
+type = "required"
+versionRange = "${cct_version_range}"
+ordering = "AFTER"
+side = "SERVER"
