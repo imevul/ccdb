@@ -1,0 +1,117 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - gradle.properties
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Read versions
+        id: ver
+        run: |
+          set -euo pipefail
+          prop() { sed -n "s/^${1}=//p" gradle.properties | head -n1; }
+
+          mod_id=$(prop mod_id)
+          mod_name=$(prop mod_name)
+          mod_version=$(prop mod_version)
+          minecraft_version=$(prop minecraft_version)
+          neo_version=$(prop neo_version)
+          cct_version=$(prop cct_version)
+
+          if [[ -z "$mod_id" || -z "$mod_version" ]]; then
+            echo "mod_id or mod_version missing from gradle.properties" >&2
+            exit 1
+          fi
+
+          prev=""
+          if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            prev=$(git show HEAD^:gradle.properties | sed -n 's/^mod_version=//p' | head -n1)
+          fi
+
+          release=false
+          if [[ -z "$prev" || "$prev" != "$mod_version" ]]; then
+            release=true
+          fi
+
+          {
+            echo "release=${release}"
+            echo "mod_id=${mod_id}"
+            echo "mod_name=${mod_name}"
+            echo "mod_version=${mod_version}"
+            echo "minecraft_version=${minecraft_version}"
+            echo "neo_version=${neo_version}"
+            echo "cct_version=${cct_version}"
+            echo "tag=v${mod_version}"
+            echo "jar=build/libs/${mod_id}-${minecraft_version}-${mod_version}.jar"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "mod_version ${prev:-<none>} -> ${mod_version} (release=${release})"
+
+      - name: Skip if version unchanged
+        if: steps.ver.outputs.release != 'true'
+        run: echo "mod_version unchanged; skipping release"
+
+      - name: Fail if tag already exists
+        if: steps.ver.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}"; then
+            echo "Tag ${TAG} already exists" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists" >&2
+            exit 1
+          fi
+
+      - name: Set up Java
+        if: steps.ver.outputs.release == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Build
+        if: steps.ver.outputs.release == 'true'
+        run: ./gradlew build --no-daemon
+
+      - name: Publish GitHub release
+        if: steps.ver.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          TITLE: ${{ steps.ver.outputs.mod_name }} ${{ steps.ver.outputs.mod_version }}
+          JAR: ${{ steps.ver.outputs.jar }}
+          MC: ${{ steps.ver.outputs.minecraft_version }}
+          NEO: ${{ steps.ver.outputs.neo_version }}
+          CCT: ${{ steps.ver.outputs.cct_version }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f "$JAR" ]]; then
+            echo "Expected jar not found: ${JAR}" >&2
+            ls -la build/libs || true
+            exit 1
+          fi
+          notes="Built for Minecraft ${MC}, NeoForge ${NEO}, CC: Tweaked ${CCT}."
+          gh release create "$TAG" \
+            --title "$TITLE" \
+            --notes "$notes" \
+            --generate-notes \
+            "$JAR"
