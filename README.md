@@ -99,12 +99,12 @@ local result = db.exec("INSERT INTO items (name, count) VALUES (?, ?)", "stone",
 -- result = { changes = 1, last_insert_id = ... }
 ```
 
-Use `?` placeholders. `ATTACH`, `PRAGMA`, `load_extension`, and multiple statements in one call are rejected. Do not yield inside `transaction`.
+Use `?` placeholders. `ATTACH`, `PRAGMA`, `load_extension`, and multiple statements in one call are rejected.
 
 ## Concurrency
 
-Computers share one connection. Writes are serialized with a lock. `transaction` runs `BEGIN IMMEDIATE` so a batch of helper calls is atomic; nested `transaction` calls join the same transaction.
+Computers share one connection. Writes are serialized with a lock. `transaction` is a Lua wrapper around `begin` / `commit` / `rollback` (`BEGIN IMMEDIATE`). Nested `transaction` calls join the same transaction. Do not yield while a transaction is open.
 
 ## License
 
-[MIT](LICENSE.md). You may use, modify, redistribute, and include this mod in modpacks.
+[MIT](LICENSE.md). You may use, modify, redistribute, and include this mod in modpacks. The jar bundles sqlite-jdbc (Apache-2.0); see [NOTICE.md](NOTICE.md).

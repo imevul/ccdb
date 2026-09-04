@@ -86,6 +86,13 @@ var generateModMetadata = tasks.register('generateModMetadata', ProcessResources
 sourceSets.main.resources.srcDir generateModMetadata
 neoForge.ideSyncTask generateModMetadata
 
+tasks.named('processResources', ProcessResources).configure {
+	from('NOTICE.md') {
+		into 'META-INF'
+		rename { 'NOTICE' }
+	}
+}
+
 tasks.withType(JavaCompile).configureEach {
 	options.encoding = 'UTF-8'
 }

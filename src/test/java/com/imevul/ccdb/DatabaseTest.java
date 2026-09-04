@@ -106,6 +106,39 @@ class DatabaseTest {
 	}
 
 	@Test
+	void beginCommitAndRollback() {
+		Database db = Database.get();
+		db.bind(7);
+		try {
+			db.begin();
+			db.insert("items", Map.of("name", "dirt", "count", 1));
+			db.rollback();
+			assertNull(db.get("items", Map.of("name", "dirt")));
+
+			db.begin();
+			db.insert("items", Map.of("name", "dirt", "count", 1));
+			db.commit();
+			assertEquals(1, ((Number) db.get("items", Map.of("name", "dirt")).get("count")).intValue());
+		} finally {
+			db.unbind();
+		}
+	}
+
+	@Test
+	void abortIfOwnerRollsBack() {
+		Database db = Database.get();
+		db.bind(3);
+		try {
+			db.begin();
+			db.insert("items", Map.of("name", "sand", "count", 2));
+		} finally {
+			db.unbind();
+		}
+		db.abortIfOwner(3);
+		assertNull(db.get("items", Map.of("name", "sand")));
+	}
+
+	@Test
 	void concurrentIncrements() throws Exception {
 		Database.get().insert("items", Map.of("name", "shared", "count", 0));
 		int threads = 8;

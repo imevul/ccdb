@@ -13,7 +13,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Process-wide SQLite handle. One connection, one lock, WAL + busy timeout.
@@ -23,18 +24,29 @@ public final class Database {
 	public static final int BUSY_TIMEOUT_MS = 5000;
 	public static final int STATEMENT_TIMEOUT_SEC = 5;
 
+	private static final int NO_OWNER = Integer.MIN_VALUE;
 	private static final Database INSTANCE = new Database();
 
-	private final ReentrantLock lock = new ReentrantLock();
-	private final ThreadLocal<Integer> txDepth = ThreadLocal.withInitial(() -> 0);
+	private final Semaphore mutex = new Semaphore(1, true);
+	private final ThreadLocal<Integer> boundComputer = new ThreadLocal<>();
+	private int txOwner = NO_OWNER;
+	private int txDepth;
 	private Connection connection;
 
 	public static Database get() {
 		return INSTANCE;
 	}
 
+	public void bind(int computerId) {
+		boundComputer.set(computerId);
+	}
+
+	public void unbind() {
+		boundComputer.remove();
+	}
+
 	public void open(Path dir) throws SQLException, IOException {
-		lock.lock();
+		acquire();
 		try {
 			closeUnlocked();
 			Files.createDirectories(dir);
@@ -47,26 +59,26 @@ public final class Database {
 			}
 			connection.setAutoCommit(true);
 		} finally {
-			lock.unlock();
+			mutex.release();
 		}
 	}
 
 	public void close() {
-		lock.lock();
+		if (txDepth > 0) {
+			rollbackQuietly();
+			clearTransaction();
+			mutex.release();
+		}
+		acquire();
 		try {
 			closeUnlocked();
 		} finally {
-			lock.unlock();
+			mutex.release();
 		}
 	}
 
 	public boolean isOpen() {
-		lock.lock();
-		try {
-			return connection != null;
-		} finally {
-			lock.unlock();
-		}
+		return connection != null;
 	}
 
 	public Map<String, Object> exec(String sql, List<Object> params) {
@@ -79,42 +91,92 @@ public final class Database {
 		return withLock(() -> queryUnlocked(sql, params));
 	}
 
-	public <T> T transaction(SqlWork<T> work) {
+	public void begin() {
 		ensureOpen();
-		lock.lock();
+		int caller = caller();
+		if (inOwnTransaction(caller)) {
+			txDepth++;
+			return;
+		}
+		acquire();
 		try {
-			int depth = txDepth.get();
-			if (depth > 0) {
-				txDepth.set(depth + 1);
-				try {
-					return work.run();
-				} finally {
-					txDepth.set(depth);
-				}
-			}
-			txDepth.set(1);
+			ensureOpenUnlocked();
 			try (Statement begin = connection.createStatement()) {
 				begin.execute("BEGIN IMMEDIATE");
 			}
-			try {
-				T result = work.run();
-				try (Statement commit = connection.createStatement()) {
-					commit.execute("COMMIT");
-				}
-				return result;
-			} catch (RuntimeException e) {
-				rollbackQuietly();
-				throw e;
-			} catch (SQLException e) {
-				rollbackQuietly();
-				throw wrap(e);
-			} finally {
-				txDepth.set(0);
+			txOwner = caller;
+			txDepth = 1;
+		} catch (SQLException e) {
+			mutex.release();
+			throw wrap(e);
+		}
+	}
+
+	public void commit() {
+		ensureOpen();
+		int caller = caller();
+		if (!inOwnTransaction(caller)) {
+			throw new IllegalStateException("no open transaction");
+		}
+		txDepth--;
+		if (txDepth > 0) {
+			return;
+		}
+		try {
+			ensureOpenUnlocked();
+			try (Statement commit = connection.createStatement()) {
+				commit.execute("COMMIT");
 			}
 		} catch (SQLException e) {
+			rollbackQuietly();
 			throw wrap(e);
 		} finally {
-			lock.unlock();
+			clearTransaction();
+			mutex.release();
+		}
+	}
+
+	public void rollback() {
+		ensureOpen();
+		if (!inOwnTransaction(caller())) {
+			throw new IllegalStateException("no open transaction");
+		}
+		try {
+			rollbackQuietly();
+		} finally {
+			clearTransaction();
+			mutex.release();
+		}
+	}
+
+	public void abortIfOwner(int computerId) {
+		if (txDepth <= 0 || txOwner != computerId) {
+			return;
+		}
+		try {
+			rollbackQuietly();
+		} finally {
+			clearTransaction();
+			mutex.release();
+		}
+	}
+
+	public <T> T transaction(SqlWork<T> work) {
+		begin();
+		try {
+			T result = work.run();
+			commit();
+			return result;
+		} catch (RuntimeException e) {
+			if (inOwnTransaction(caller())) {
+				rollback();
+			}
+			throw e;
+		} catch (SQLException e) {
+			if (inOwnTransaction(caller())) {
+				rollback();
+			}
+			throw wrap(e);
 		}
 	}
 
@@ -277,13 +339,20 @@ public final class Database {
 
 	private <T> T withLock(SqlWork<T> work) {
 		ensureOpen();
-		lock.lock();
+		if (inOwnTransaction(caller())) {
+			try {
+				return work.run();
+			} catch (SQLException e) {
+				throw wrap(e);
+			}
+		}
+		acquire();
 		try {
 			return work.run();
 		} catch (SQLException e) {
 			throw wrap(e);
 		} finally {
-			lock.unlock();
+			mutex.release();
 		}
 	}
 
@@ -312,8 +381,33 @@ public final class Database {
 		} catch (SQLException ignored) {
 		} finally {
 			connection = null;
-			txDepth.set(0);
+			clearTransaction();
 		}
+	}
+
+	private void acquire() {
+		try {
+			if (!mutex.tryAcquire(BUSY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+				throw new IllegalStateException("database is busy");
+			}
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new IllegalStateException("database is busy");
+		}
+	}
+
+	private int caller() {
+		Integer id = boundComputer.get();
+		return id == null ? NO_OWNER : id;
+	}
+
+	private boolean inOwnTransaction(int caller) {
+		return txDepth > 0 && txOwner == caller;
+	}
+
+	private void clearTransaction() {
+		txOwner = NO_OWNER;
+		txDepth = 0;
 	}
 
 	private void rollbackQuietly() {
